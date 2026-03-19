@@ -15,7 +15,7 @@ Current core coverage:
 - Full stream queue (`lds_client_listen_next`)
 - Local mailbox bindings:
   - exact prefix + suffix
-  - regex + suffix
+  - lightweight pattern + suffix
 - Ordered matching chain per suffix
 - `allow_overlap` short-circuit behavior
 - local route query (`lds_client_route`)
@@ -27,6 +27,7 @@ Current core coverage:
 - Mailbox queue is activated on first `lds_mailbox_listen_next` call.
 - Messages arriving before mailbox queue activation are not backfilled.
 - Exact and regex bindings share one creation-order chain.
+- The C SDK pattern matcher is intentionally lightweight, not a full PCRE/ECMAScript regex engine.
 
 ## Build
 

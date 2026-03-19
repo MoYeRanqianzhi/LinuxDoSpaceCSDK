@@ -40,6 +40,8 @@ typedef struct lds_message_queue {
 
 struct lds_message {
   char *address;
+  char **recipients;
+  size_t recipient_count;
   char *sender;
   char *subject;
   char *message_id;
@@ -77,6 +79,9 @@ struct lds_client {
   char *base_url;
   int closed;
   lds_message_queue all_queue;
+  lds_mailbox **mailboxes;
+  size_t mailbox_count;
+  size_t mailbox_cap;
   lds_binding *bindings;
   size_t binding_count;
   size_t binding_cap;
@@ -87,6 +92,13 @@ static void message_free_inner(lds_message *msg) {
     return;
   }
   free(msg->address);
+  if (msg->recipients != NULL) {
+    size_t i;
+    for (i = 0; i < msg->recipient_count; i++) {
+      free(msg->recipients[i]);
+    }
+    free(msg->recipients);
+  }
   free(msg->sender);
   free(msg->subject);
   free(msg->message_id);
@@ -283,6 +295,77 @@ static char *extract_json_first_array_string(const char *json, const char *key) 
   }
 }
 
+static int extract_json_array_strings(const char *json, const char *key, char ***out_values, size_t *out_count) {
+  const char *p = find_key(json, key);
+  const char *q;
+  char **items = NULL;
+  size_t count = 0;
+  size_t cap = 0;
+  if (p == NULL) {
+    *out_values = NULL;
+    *out_count = 0;
+    return 1;
+  }
+  q = strchr(p, '[');
+  if (q == NULL) {
+    return 0;
+  }
+  q++;
+  while (*q != '\0') {
+    while (*q != '\0' && *q != '"' && *q != ']') {
+      q++;
+    }
+    if (*q == ']') {
+      break;
+    }
+    if (*q != '"') {
+      break;
+    }
+    {
+      const char *vstart = q + 1;
+      const char *vend = vstart;
+      char *item;
+      while (*vend != '\0') {
+        if (*vend == '"' && *(vend - 1) != '\\') {
+          break;
+        }
+        vend++;
+      }
+      item = dup_str_range(vstart, vend);
+      if (item == NULL) {
+        size_t i;
+        for (i = 0; i < count; i++) {
+          free(items[i]);
+        }
+        free(items);
+        return 0;
+      }
+      if (count == cap) {
+        size_t next_cap = cap == 0 ? 4 : cap * 2;
+        char **next_items = (char **)realloc(items, sizeof(char *) * next_cap);
+        if (next_items == NULL) {
+          size_t i;
+          free(item);
+          for (i = 0; i < count; i++) {
+            free(items[i]);
+          }
+          free(items);
+          return 0;
+        }
+        items = next_items;
+        cap = next_cap;
+      }
+      trim_inplace(item);
+      lower_inplace(item);
+      items[count++] = item;
+      q = (*vend == '\0') ? vend : vend + 1;
+    }
+  }
+  *out_values = items;
+  *out_count = count;
+  return 1;
+}
+
 static int b64_val(char c) {
   if (c >= 'A' && c <= 'Z') return c - 'A';
   if (c >= 'a' && c <= 'z') return c - 'a' + 26;
@@ -374,10 +457,26 @@ static char *extract_body(const char *raw) {
 
 static lds_message *clone_message(const lds_message *src) {
   lds_message *msg = (lds_message *)calloc(1, sizeof(lds_message));
+  size_t i;
   if (msg == NULL) {
     return NULL;
   }
   msg->address = dup_str(src->address);
+  if (src->recipient_count > 0) {
+    msg->recipients = (char **)calloc(src->recipient_count, sizeof(char *));
+    if (msg->recipients == NULL) {
+      message_free_inner(msg);
+      return NULL;
+    }
+    msg->recipient_count = src->recipient_count;
+    for (i = 0; i < src->recipient_count; i++) {
+      msg->recipients[i] = dup_str(src->recipients[i]);
+      if (msg->recipients[i] == NULL) {
+        message_free_inner(msg);
+        return NULL;
+      }
+    }
+  }
   msg->sender = dup_str(src->sender);
   msg->subject = dup_str(src->subject);
   msg->message_id = dup_str(src->message_id);
@@ -507,6 +606,7 @@ static void split_address(const char *address, char **local_part, char **suffix)
 
 static lds_error_code dispatch_message(lds_client *client, const lds_message *base_msg) {
   size_t i;
+  size_t recipient_index;
   lds_message *for_all = clone_message(base_msg);
   if (for_all == NULL) {
     return LDS_ERR_NO_MEMORY;
@@ -516,10 +616,21 @@ static lds_error_code dispatch_message(lds_client *client, const lds_message *ba
     return LDS_ERR_NO_MEMORY;
   }
 
-  {
+  for (recipient_index = 0; recipient_index < base_msg->recipient_count; recipient_index++) {
     char *local = NULL;
     char *suffix = NULL;
-    split_address(base_msg->address, &local, &suffix);
+    const char *recipient = base_msg->recipients[recipient_index];
+    int seen_recipient = 0;
+    for (i = 0; i < recipient_index; i++) {
+      if (strcmp(base_msg->recipients[i], recipient) == 0) {
+        seen_recipient = 1;
+        break;
+      }
+    }
+    if (seen_recipient) {
+      continue;
+    }
+    split_address(recipient, &local, &suffix);
     if (local == NULL || suffix == NULL) {
       free(local);
       free(suffix);
@@ -532,7 +643,11 @@ static lds_error_code dispatch_message(lds_client *client, const lds_message *ba
       }
       if (mb->queue_active && !mb->closed) {
         lds_message *copy = clone_message(base_msg);
-        if (copy == NULL || !queue_push(&mb->queue, copy)) {
+        if (copy != NULL) {
+          free(copy->address);
+          copy->address = dup_str(recipient);
+        }
+        if (copy == NULL || copy->address == NULL || !queue_push(&mb->queue, copy)) {
           if (copy != NULL) {
             message_free_inner(copy);
           }
@@ -554,25 +669,47 @@ static lds_error_code dispatch_message(lds_client *client, const lds_message *ba
 static lds_error_code parse_mail_event(const char *line, lds_message **out_msg) {
   char *sender = extract_json_string(line, "original_envelope_from");
   char *received_at = extract_json_string(line, "received_at");
-  char *recipient = extract_json_first_array_string(line, "original_recipients");
   char *b64 = extract_json_string(line, "raw_message_base64");
+  char **recipients = NULL;
+  size_t recipient_count = 0;
   uint8_t *raw_bytes = NULL;
   size_t raw_bytes_len = 0;
   lds_message *msg;
   char *raw_utf8;
-  if (sender == NULL || received_at == NULL || recipient == NULL || b64 == NULL) {
-    free(sender); free(received_at); free(recipient); free(b64);
+  if (sender == NULL || received_at == NULL || b64 == NULL) {
+    free(sender); free(received_at); free(b64);
     return LDS_ERR_NO_MEMORY;
   }
-  trim_inplace(recipient);
-  lower_inplace(recipient);
+  if (!extract_json_array_strings(line, "original_recipients", &recipients, &recipient_count)) {
+    free(sender); free(received_at); free(b64);
+    return LDS_ERR_NO_MEMORY;
+  }
+  if (recipient_count == 0) {
+    size_t i;
+    free(sender); free(received_at); free(b64);
+    for (i = 0; i < recipient_count; i++) {
+      free(recipients[i]);
+    }
+    free(recipients);
+    return LDS_ERR_PARSE;
+  }
   if (!base64_decode(b64, &raw_bytes, &raw_bytes_len)) {
-    free(sender); free(received_at); free(recipient); free(b64);
+    size_t i;
+    free(sender); free(received_at); free(b64);
+    for (i = 0; i < recipient_count; i++) {
+      free(recipients[i]);
+    }
+    free(recipients);
     return LDS_ERR_PARSE;
   }
   raw_utf8 = (char *)malloc(raw_bytes_len + 1);
   if (raw_utf8 == NULL) {
-    free(sender); free(received_at); free(recipient); free(b64); free(raw_bytes);
+    size_t i;
+    free(sender); free(received_at); free(b64); free(raw_bytes);
+    for (i = 0; i < recipient_count; i++) {
+      free(recipients[i]);
+    }
+    free(recipients);
     return LDS_ERR_NO_MEMORY;
   }
   memcpy(raw_utf8, raw_bytes, raw_bytes_len);
@@ -580,10 +717,17 @@ static lds_error_code parse_mail_event(const char *line, lds_message **out_msg) 
 
   msg = (lds_message *)calloc(1, sizeof(lds_message));
   if (msg == NULL) {
-    free(sender); free(received_at); free(recipient); free(b64); free(raw_bytes); free(raw_utf8);
+    size_t i;
+    free(sender); free(received_at); free(b64); free(raw_bytes); free(raw_utf8);
+    for (i = 0; i < recipient_count; i++) {
+      free(recipients[i]);
+    }
+    free(recipients);
     return LDS_ERR_NO_MEMORY;
   }
-  msg->address = recipient;
+  msg->address = dup_str(recipients[0]);
+  msg->recipients = recipients;
+  msg->recipient_count = recipient_count;
   msg->sender = sender;
   msg->received_at = received_at;
   msg->raw = raw_utf8;
@@ -599,7 +743,7 @@ static lds_error_code parse_mail_event(const char *line, lds_message **out_msg) 
   msg->text = extract_body(raw_utf8);
   msg->html = dup_str("");
   free(b64);
-  if (msg->subject == NULL || msg->message_id == NULL || msg->date == NULL ||
+  if (msg->address == NULL || msg->subject == NULL || msg->message_id == NULL || msg->date == NULL ||
       msg->from_header == NULL || msg->to_header == NULL || msg->cc_header == NULL ||
       msg->reply_to_header == NULL || msg->text == NULL || msg->html == NULL) {
     message_free_inner(msg);
@@ -618,6 +762,19 @@ static int ensure_binding_cap(lds_client *client) {
     }
     client->bindings = next;
     client->binding_cap = next_cap;
+  }
+  return 1;
+}
+
+static int ensure_mailbox_cap(lds_client *client) {
+  if (client->mailbox_count == client->mailbox_cap) {
+    size_t next_cap = client->mailbox_cap == 0 ? 8 : client->mailbox_cap * 2;
+    lds_mailbox **next = (lds_mailbox **)realloc(client->mailboxes, sizeof(lds_mailbox *) * next_cap);
+    if (next == NULL) {
+      return 0;
+    }
+    client->mailboxes = next;
+    client->mailbox_cap = next_cap;
   }
   return 1;
 }
@@ -652,12 +809,19 @@ void lds_client_destroy(lds_client *client) {
     if (mb != NULL) {
       mb->closed = 1;
       queue_clear(&mb->queue);
-      free(mb->suffix);
-      free(mb->prefix);
-      free(mb->pattern);
-      free(mb);
     }
   }
+  for (i = 0; i < client->mailbox_count; i++) {
+    lds_mailbox *mb = client->mailboxes[i];
+    if (mb == NULL) {
+      continue;
+    }
+    free(mb->suffix);
+    free(mb->prefix);
+    free(mb->pattern);
+    free(mb);
+  }
+  free(client->mailboxes);
   free(client->bindings);
   free(client->token);
   free(client->base_url);
@@ -754,6 +918,9 @@ static lds_error_code bind_common(
   if (!ensure_binding_cap(client)) {
     return LDS_ERR_NO_MEMORY;
   }
+  if (!ensure_mailbox_cap(client)) {
+    return LDS_ERR_NO_MEMORY;
+  }
   mb = (lds_mailbox *)calloc(1, sizeof(lds_mailbox));
   if (mb == NULL) {
     return LDS_ERR_NO_MEMORY;
@@ -780,8 +947,9 @@ static lds_error_code bind_common(
     free(mb->prefix);
     free(mb->pattern);
     free(mb);
-    return LDS_ERR_PARSE;
+    return LDS_ERR_NO_MEMORY;
   }
+  client->mailboxes[client->mailbox_count++] = mb;
   client->bindings[client->binding_count++].mailbox = mb;
   *out_mailbox = mb;
   return LDS_OK;
@@ -806,11 +974,24 @@ lds_error_code lds_client_bind_regex(
 }
 
 void lds_mailbox_close(lds_mailbox *mailbox) {
+  size_t read_index;
+  size_t write_index = 0;
+  lds_client *owner;
   if (mailbox == NULL || mailbox->closed) {
     return;
   }
   mailbox->closed = 1;
   queue_clear(&mailbox->queue);
+  owner = mailbox->owner;
+  if (owner == NULL) {
+    return;
+  }
+  for (read_index = 0; read_index < owner->binding_count; read_index++) {
+    if (owner->bindings[read_index].mailbox != mailbox) {
+      owner->bindings[write_index++] = owner->bindings[read_index];
+    }
+  }
+  owner->binding_count = write_index;
 }
 
 lds_error_code lds_mailbox_listen_next(lds_mailbox *mailbox, lds_message **out_message) {
