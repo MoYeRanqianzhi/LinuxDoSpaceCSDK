@@ -6,7 +6,7 @@
 
 This SDK implements the protocol and local dispatch semantics described in:
 
-- `sdk/spec/MAIL_STREAM_PROTOCOL.md`
+- `https://github.com/MoYeRanqianzhi/LinuxDoSpace/blob/main/sdk/spec/MAIL_STREAM_PROTOCOL.md`
 
 Current core coverage:
 
@@ -39,7 +39,6 @@ Requirements:
 Build steps:
 
 ```bash
-cd sdk/c
 cmake -S . -B build
 cmake --build build
 ```

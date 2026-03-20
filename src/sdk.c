@@ -837,9 +837,13 @@ void lds_client_close(lds_client *client) {
   queue_clear(&client->all_queue);
   for (i = 0; i < client->binding_count; i++) {
     if (client->bindings[i].mailbox != NULL) {
+      client->bindings[i].mailbox->closed = 1;
+      client->bindings[i].mailbox->queue_active = 0;
+      client->bindings[i].mailbox->owner = NULL;
       queue_clear(&client->bindings[i].mailbox->queue);
     }
   }
+  client->binding_count = 0;
 }
 
 lds_error_code lds_client_ingest_ndjson_line(lds_client *client, const char *line, size_t line_len) {
@@ -992,6 +996,7 @@ void lds_mailbox_close(lds_mailbox *mailbox) {
     }
   }
   owner->binding_count = write_index;
+  mailbox->owner = NULL;
 }
 
 lds_error_code lds_mailbox_listen_next(lds_mailbox *mailbox, lds_message **out_message) {
@@ -1022,6 +1027,9 @@ size_t lds_client_route(
   size_t i;
   size_t written = 0;
   if (client == NULL || address == NULL || out_mailboxes == NULL || max_count == 0) {
+    return 0;
+  }
+  if (client->closed) {
     return 0;
   }
   split_address(address, &local, &suffix);
