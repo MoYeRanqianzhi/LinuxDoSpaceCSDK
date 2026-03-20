@@ -18,6 +18,11 @@ Current core coverage:
   - lightweight pattern + suffix
 - Ordered matching chain per suffix
 - `allow_overlap` short-circuit behavior
+
+Important:
+
+- `LDS_SUFFIX_LINUXDO_SPACE` is semantic, not literal
+- the SDK resolves it to `<owner_username>.linuxdo.space` after `ready.owner_username`
 - local route query (`lds_client_route`)
 - mailbox close and queue lifecycle
 

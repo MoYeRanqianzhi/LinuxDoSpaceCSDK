@@ -8,9 +8,11 @@ int main(void) {
   lds_mailbox *alice = NULL;
   lds_message *msg = NULL;
   lds_message_view view;
+  const char *ready_line =
+      "{\"type\":\"ready\",\"token_public_id\":\"tok_123\",\"owner_username\":\"testuser\"}";
   const char *mail_line =
       "{\"type\":\"mail\",\"original_envelope_from\":\"bounce@example.com\","
-      "\"original_recipients\":[\"alice@linuxdo.space\"],"
+      "\"original_recipients\":[\"alice@testuser.linuxdo.space\"],"
       "\"received_at\":\"2026-03-20T10:11:12Z\","
       "\"raw_message_base64\":\"RnJvbTogU2VuZGVyIDxzZW5kZXJAZXhhbXBsZS5jb20+DQpUbzogQWxpY2UgPGFsaWNlQGxpbnV4ZG8uc3BhY2U+DQpTdWJqZWN0OiBUZXN0DQoNCkhlbGxvIGZyb20gQyBTREs=\"}";
   lds_client_config cfg;
@@ -36,6 +38,13 @@ int main(void) {
   if (msg != NULL) {
     lds_message_free(msg);
     msg = NULL;
+  }
+
+  code = lds_client_ingest_ndjson_line(client, ready_line, strlen(ready_line));
+  if (code != LDS_OK) {
+    fprintf(stderr, "ready ingest failed: %d\n", (int)code);
+    lds_client_destroy(client);
+    return 1;
   }
 
   code = lds_client_ingest_ndjson_line(client, mail_line, strlen(mail_line));

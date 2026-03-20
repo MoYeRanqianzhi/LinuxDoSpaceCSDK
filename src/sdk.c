@@ -77,6 +77,7 @@ typedef struct lds_binding {
 struct lds_client {
   char *token;
   char *base_url;
+  char *owner_username;
   int closed;
   lds_message_queue all_queue;
   lds_mailbox **mailboxes;
@@ -574,11 +575,32 @@ static int regex_fullmatch_simple(const char *pattern, const char *text) {
   return regex_match_here(pattern, text);
 }
 
-static int mailbox_matches(const lds_mailbox *mailbox, const char *local_part, const char *suffix) {
+static int mailbox_suffix_matches(const lds_client *client, const lds_mailbox *mailbox, const char *suffix) {
+  size_t owner_len;
+  if (mailbox->suffix == NULL || suffix == NULL) {
+    return 0;
+  }
+  if (str_casecmp(mailbox->suffix, LDS_SUFFIX_LINUXDO_SPACE) != 0) {
+    return str_casecmp(mailbox->suffix, suffix) == 0;
+  }
+  if (client == NULL || client->owner_username == NULL || client->owner_username[0] == '\0') {
+    return 0;
+  }
+  owner_len = strlen(client->owner_username);
+  if (str_ncasecmp(suffix, client->owner_username, owner_len) != 0) {
+    return 0;
+  }
+  if (suffix[owner_len] != '.') {
+    return 0;
+  }
+  return str_casecmp(suffix + owner_len + 1, LDS_SUFFIX_LINUXDO_SPACE) == 0;
+}
+
+static int mailbox_matches(const lds_client *client, const lds_mailbox *mailbox, const char *local_part, const char *suffix) {
   if (mailbox->closed) {
     return 0;
   }
-  if (str_casecmp(mailbox->suffix, suffix) != 0) {
+  if (!mailbox_suffix_matches(client, mailbox, suffix)) {
     return 0;
   }
   if (mailbox->mode == LDS_MAILBOX_MODE_EXACT) {
@@ -638,7 +660,7 @@ static lds_error_code dispatch_message(lds_client *client, const lds_message *ba
     }
     for (i = 0; i < client->binding_count; i++) {
       lds_mailbox *mb = client->bindings[i].mailbox;
-      if (!mailbox_matches(mb, local, suffix)) {
+      if (!mailbox_matches(client, mb, local, suffix)) {
         continue;
       }
       if (mb->queue_active && !mb->closed) {
@@ -825,6 +847,7 @@ void lds_client_destroy(lds_client *client) {
   free(client->bindings);
   free(client->token);
   free(client->base_url);
+  free(client->owner_username);
   free(client);
 }
 
@@ -868,7 +891,28 @@ lds_error_code lds_client_ingest_ndjson_line(lds_client *client, const char *lin
     free(tmp);
     return LDS_ERR_NO_MEMORY;
   }
-  if (strcmp(etype, "ready") == 0 || strcmp(etype, "heartbeat") == 0) {
+  if (strcmp(etype, "ready") == 0) {
+    char *owner_username = extract_json_string(tmp, "owner_username");
+    if (owner_username == NULL) {
+      free(etype);
+      free(tmp);
+      return LDS_ERR_NO_MEMORY;
+    }
+    trim_inplace(owner_username);
+    lower_inplace(owner_username);
+    if (owner_username[0] == '\0') {
+      free(owner_username);
+      free(etype);
+      free(tmp);
+      return LDS_ERR_PARSE;
+    }
+    free(client->owner_username);
+    client->owner_username = owner_username;
+    free(etype);
+    free(tmp);
+    return LDS_OK;
+  }
+  if (strcmp(etype, "heartbeat") == 0) {
     free(etype);
     free(tmp);
     return LDS_OK;
@@ -1040,7 +1084,7 @@ size_t lds_client_route(
   }
   for (i = 0; i < client->binding_count; i++) {
     lds_mailbox *mb = client->bindings[i].mailbox;
-    if (!mailbox_matches(mb, local, suffix)) {
+    if (!mailbox_matches(client, mb, local, suffix)) {
       continue;
     }
     if (written < max_count) {

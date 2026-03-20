@@ -60,7 +60,11 @@ typedef struct lds_message_view {
   size_t raw_bytes_len;
 } lds_message_view;
 
-/* Convenience suffix constant to mirror higher level SDKs. */
+/*
+ * Convenience first-party namespace suffix constant.
+ * This value is semantic rather than literal: when owner_username is known,
+ * bindings match "<owner_username>.linuxdo.space".
+ */
 #define LDS_SUFFIX_LINUXDO_SPACE "linuxdo.space"
 
 /* Create one client. Token must be non-empty. */
@@ -74,7 +78,8 @@ void lds_client_close(lds_client *client);
 
 /*
  * Ingest one NDJSON line from /v1/token/email/stream.
- * The function ignores "ready" and "heartbeat" events, and dispatches "mail".
+ * The function stores owner_username from "ready", ignores "heartbeat", and
+ * dispatches "mail".
  */
 lds_error_code lds_client_ingest_ndjson_line(lds_client *client, const char *line, size_t line_len);
 
