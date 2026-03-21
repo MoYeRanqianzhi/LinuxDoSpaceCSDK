@@ -37,4 +37,3 @@
 - `allow_overlap=0` stops at the first match.
 - Regex support is lightweight, not full PCRE.
 - `lds_client_close(...)` does not free the client allocation.
-

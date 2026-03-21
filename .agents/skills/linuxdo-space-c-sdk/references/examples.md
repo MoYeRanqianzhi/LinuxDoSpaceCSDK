@@ -24,4 +24,3 @@ printf("%s\n", view.address);
 printf("%s\n", view.subject);
 lds_message_free(message);
 ```
-

@@ -54,4 +54,3 @@ lds_client_destroy(client);
 - Mailbox queues activate only on first mailbox listen call.
 - `LDS_SUFFIX_LINUXDO_SPACE` is semantic, not literal.
 - `lds_client_route(...)` is read-only local matching, not message replay.
-

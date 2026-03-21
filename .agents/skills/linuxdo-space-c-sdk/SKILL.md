@@ -34,4 +34,3 @@ Read [references/development.md](references/development.md) only when editing `s
 - Do not document PCRE/ECMAScript regex support; the matcher is intentionally lightweight.
 - Do not imply `lds_mailbox_close(...)` frees mailbox memory independently of client destruction.
 - Do not describe this SDK as a public package-manager install; current release output is source artifacts.
-
