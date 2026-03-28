@@ -22,7 +22,12 @@ Current core coverage:
 Important:
 
 - `LDS_SUFFIX_LINUXDO_SPACE` is semantic, not literal
-- the SDK resolves it to `<owner_username>.linuxdo.space` after `ready.owner_username`
+- the canonical default binding resolves to
+  `<owner_username>-mail.linuxdo.space`
+- `lds_client_bind_*_linuxdo_space(..., mail_suffix_fragment, ...)` resolves
+  dynamic namespaces like `<owner_username>-mailfoo.linuxdo.space`
+- the legacy default alias `<owner_username>.linuxdo.space` still matches the
+  default semantic binding automatically
 - local route query (`lds_client_route`)
 - mailbox close and queue lifecycle
 

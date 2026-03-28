@@ -62,8 +62,16 @@ typedef struct lds_message_view {
 
 /*
  * Convenience first-party namespace suffix constant.
- * This value is semantic rather than literal: when owner_username is known,
- * bindings match "<owner_username>.linuxdo.space".
+ * This value is semantic rather than literal.
+ *
+ * Current canonical behavior:
+ * - `LDS_SUFFIX_LINUXDO_SPACE` resolves to
+ *   `<owner_username>-mail.linuxdo.space`
+ * - legacy routed events for `<owner_username>.linuxdo.space` are still
+ *   accepted for backward-compatible matching
+ * - dynamic semantic variants such as
+ *   `<owner_username>-mailfoo.linuxdo.space` are created through the explicit
+ *   `*_linuxdo_space(..., "foo", ...)` helper APIs below
  */
 #define LDS_SUFFIX_LINUXDO_SPACE "linuxdo.space"
 
@@ -79,7 +87,9 @@ void lds_client_close(lds_client *client);
 /*
  * Ingest one NDJSON line from /v1/token/email/stream.
  * The function stores owner_username from "ready", ignores "heartbeat", and
- * dispatches "mail".
+ * dispatches "mail". The stored owner_username is also what semantic
+ * linuxdo.space bindings use to resolve the canonical `@<owner>-mail.<root>`
+ * namespace plus any explicit dynamic `-mail<suffix>` variants.
  */
 lds_error_code lds_client_ingest_ndjson_line(lds_client *client, const char *line, size_t line_len);
 
@@ -99,6 +109,34 @@ lds_error_code lds_client_bind_regex(
     lds_client *client,
     const char *pattern,
     const char *suffix,
+    int allow_overlap,
+    lds_mailbox **out_mailbox);
+
+/*
+ * Register one exact binding against the semantic linuxdo.space mail namespace.
+ * `mail_suffix_fragment` is optional:
+ * - `NULL` or `""` => `<owner_username>-mail.linuxdo.space`
+ * - `"foo"` => `<owner_username>-mailfoo.linuxdo.space`
+ *
+ * The helper keeps backward-compatible matching for legacy
+ * `<owner_username>.linuxdo.space` events when the fragment is empty.
+ */
+lds_error_code lds_client_bind_exact_linuxdo_space(
+    lds_client *client,
+    const char *prefix,
+    const char *mail_suffix_fragment,
+    int allow_overlap,
+    lds_mailbox **out_mailbox);
+
+/*
+ * Register one regex binding against the semantic linuxdo.space mail namespace.
+ * `mail_suffix_fragment` follows the same rules as
+ * `lds_client_bind_exact_linuxdo_space(...)`.
+ */
+lds_error_code lds_client_bind_regex_linuxdo_space(
+    lds_client *client,
+    const char *pattern,
+    const char *mail_suffix_fragment,
     int allow_overlap,
     lds_mailbox **out_mailbox);
 

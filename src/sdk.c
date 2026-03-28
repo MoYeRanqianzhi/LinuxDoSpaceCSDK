@@ -62,11 +62,13 @@ struct lds_mailbox {
   struct lds_client *owner;
   lds_mailbox_mode mode;
   char *suffix;
+  char *mail_suffix_fragment;
   char *prefix;
   char *pattern;
   int allow_overlap;
   int closed;
   int queue_active;
+  int semantic_linuxdo_space;
   lds_message_queue queue;
 };
 
@@ -208,6 +210,67 @@ static void lower_inplace(char *s) {
   for (i = 0; s[i] != '\0'; i++) {
     s[i] = (char)tolower((unsigned char)s[i]);
   }
+}
+
+/*
+ * Normalize one optional dynamic `-mail<suffix>` fragment into a DNS-safe
+ * lowercase label fragment. Empty input stays empty so the default semantic
+ * suffix remains `<owner>-mail.<root>`.
+ */
+static char *normalize_mail_suffix_fragment(const char *raw) {
+  size_t i;
+  size_t length = 0;
+  int last_was_dash = 0;
+  char *normalized;
+  if (raw == NULL) {
+    return dup_str("");
+  }
+  normalized = (char *)malloc(strlen(raw) + 1);
+  if (normalized == NULL) {
+    return NULL;
+  }
+  for (i = 0; raw[i] != '\0'; i++) {
+    char ch = (char)tolower((unsigned char)raw[i]);
+    if (isalnum((unsigned char)ch)) {
+      normalized[length++] = ch;
+      last_was_dash = 0;
+      continue;
+    }
+    if (!isspace((unsigned char)ch) && !last_was_dash) {
+      normalized[length++] = '-';
+      last_was_dash = 1;
+    } else if (isspace((unsigned char)ch) && !last_was_dash) {
+      normalized[length++] = '-';
+      last_was_dash = 1;
+    }
+  }
+  while (length > 0 && normalized[length - 1] == '-') {
+    length--;
+  }
+  if (length > 0 && normalized[0] == '-') {
+    size_t offset = 0;
+    while (offset < length && normalized[offset] == '-') {
+      offset++;
+    }
+    if (offset > 0 && offset < length) {
+      memmove(normalized, normalized + offset, length - offset);
+    }
+    if (offset >= length) {
+      length = 0;
+    } else {
+      length -= offset;
+    }
+  }
+  normalized[length] = '\0';
+  if (raw[0] != '\0' && length == 0) {
+    free(normalized);
+    return NULL;
+  }
+  if (length > 48 || strchr(normalized, '.') != NULL) {
+    free(normalized);
+    return NULL;
+  }
+  return normalized;
 }
 
 static const char *find_key(const char *json, const char *key) {
@@ -575,25 +638,59 @@ static int regex_fullmatch_simple(const char *pattern, const char *text) {
   return regex_match_here(pattern, text);
 }
 
-static int mailbox_suffix_matches(const lds_client *client, const lds_mailbox *mailbox, const char *suffix) {
+/*
+ * Match one canonical or backward-compatible first-party namespace suffix.
+ *
+ * Current canonical resolution:
+ * - default semantic binding => `<owner>-mail.linuxdo.space`
+ * - dynamic semantic binding => `<owner>-mail<fragment>.linuxdo.space`
+ *
+ * Legacy compatibility keeps accepting `<owner>.linuxdo.space` for the default
+ * semantic binding so older stream payloads keep routing locally.
+ */
+static int semantic_linuxdo_space_suffix_matches(
+    const lds_client *client,
+    const char *mail_suffix_fragment,
+    const char *suffix) {
   size_t owner_len;
-  if (mailbox->suffix == NULL || suffix == NULL) {
-    return 0;
-  }
-  if (str_casecmp(mailbox->suffix, LDS_SUFFIX_LINUXDO_SPACE) != 0) {
-    return str_casecmp(mailbox->suffix, suffix) == 0;
-  }
-  if (client == NULL || client->owner_username == NULL || client->owner_username[0] == '\0') {
+  size_t fragment_len;
+  if (client == NULL || client->owner_username == NULL || client->owner_username[0] == '\0' || suffix == NULL) {
     return 0;
   }
   owner_len = strlen(client->owner_username);
+  fragment_len = strlen(mail_suffix_fragment == NULL ? "" : mail_suffix_fragment);
   if (str_ncasecmp(suffix, client->owner_username, owner_len) != 0) {
     return 0;
   }
-  if (suffix[owner_len] != '.') {
+  if (fragment_len == 0) {
+    if (suffix[owner_len] == '.') {
+      return str_casecmp(suffix + owner_len + 1, LDS_SUFFIX_LINUXDO_SPACE) == 0;
+    }
+    if (str_ncasecmp(suffix + owner_len, "-mail.", 6) == 0) {
+      return str_casecmp(suffix + owner_len + 6, LDS_SUFFIX_LINUXDO_SPACE) == 0;
+    }
     return 0;
   }
-  return str_casecmp(suffix + owner_len + 1, LDS_SUFFIX_LINUXDO_SPACE) == 0;
+  if (str_ncasecmp(suffix + owner_len, "-mail", 5) != 0) {
+    return 0;
+  }
+  if (str_ncasecmp(suffix + owner_len + 5, mail_suffix_fragment, fragment_len) != 0) {
+    return 0;
+  }
+  if (suffix[owner_len + 5 + fragment_len] != '.') {
+    return 0;
+  }
+  return str_casecmp(suffix + owner_len + 5 + fragment_len + 1, LDS_SUFFIX_LINUXDO_SPACE) == 0;
+}
+
+static int mailbox_suffix_matches(const lds_client *client, const lds_mailbox *mailbox, const char *suffix) {
+  if (mailbox->suffix == NULL || suffix == NULL) {
+    return 0;
+  }
+  if (!mailbox->semantic_linuxdo_space) {
+    return str_casecmp(mailbox->suffix, suffix) == 0;
+  }
+  return semantic_linuxdo_space_suffix_matches(client, mailbox->mail_suffix_fragment, suffix);
 }
 
 static int mailbox_matches(const lds_client *client, const lds_mailbox *mailbox, const char *local_part, const char *suffix) {
@@ -839,6 +936,7 @@ void lds_client_destroy(lds_client *client) {
       continue;
     }
     free(mb->suffix);
+    free(mb->mail_suffix_fragment);
     free(mb->prefix);
     free(mb->pattern);
     free(mb);
@@ -954,6 +1052,8 @@ static lds_error_code bind_common(
     lds_mailbox_mode mode,
     const char *prefix_or_pattern,
     const char *suffix,
+    const char *mail_suffix_fragment,
+    int semantic_linuxdo_space,
     int allow_overlap,
     lds_mailbox **out_mailbox) {
   lds_mailbox *mb;
@@ -976,7 +1076,11 @@ static lds_error_code bind_common(
   mb->owner = client;
   mb->mode = mode;
   mb->allow_overlap = allow_overlap ? 1 : 0;
+  mb->semantic_linuxdo_space = semantic_linuxdo_space ? 1 : 0;
   mb->suffix = dup_str(suffix);
+  mb->mail_suffix_fragment = semantic_linuxdo_space
+      ? normalize_mail_suffix_fragment(mail_suffix_fragment)
+      : dup_str("");
   if (mb->suffix != NULL) {
     lower_inplace(mb->suffix);
   }
@@ -989,9 +1093,11 @@ static lds_error_code bind_common(
   } else {
     mb->pattern = dup_str(prefix_or_pattern);
   }
-  if (mb->suffix == NULL || (mode == LDS_MAILBOX_MODE_EXACT && mb->prefix == NULL) ||
+  if (mb->suffix == NULL || mb->mail_suffix_fragment == NULL ||
+      (mode == LDS_MAILBOX_MODE_EXACT && mb->prefix == NULL) ||
       (mode == LDS_MAILBOX_MODE_PATTERN && mb->pattern == NULL)) {
     free(mb->suffix);
+    free(mb->mail_suffix_fragment);
     free(mb->prefix);
     free(mb->pattern);
     free(mb);
@@ -1009,7 +1115,16 @@ lds_error_code lds_client_bind_exact(
     const char *suffix,
     int allow_overlap,
     lds_mailbox **out_mailbox) {
-  return bind_common(client, LDS_MAILBOX_MODE_EXACT, prefix, suffix, allow_overlap, out_mailbox);
+  int semantic_linuxdo_space = suffix != NULL && str_casecmp(suffix, LDS_SUFFIX_LINUXDO_SPACE) == 0;
+  return bind_common(
+      client,
+      LDS_MAILBOX_MODE_EXACT,
+      prefix,
+      suffix,
+      "",
+      semantic_linuxdo_space,
+      allow_overlap,
+      out_mailbox);
 }
 
 lds_error_code lds_client_bind_regex(
@@ -1018,7 +1133,50 @@ lds_error_code lds_client_bind_regex(
     const char *suffix,
     int allow_overlap,
     lds_mailbox **out_mailbox) {
-  return bind_common(client, LDS_MAILBOX_MODE_PATTERN, pattern, suffix, allow_overlap, out_mailbox);
+  int semantic_linuxdo_space = suffix != NULL && str_casecmp(suffix, LDS_SUFFIX_LINUXDO_SPACE) == 0;
+  return bind_common(
+      client,
+      LDS_MAILBOX_MODE_PATTERN,
+      pattern,
+      suffix,
+      "",
+      semantic_linuxdo_space,
+      allow_overlap,
+      out_mailbox);
+}
+
+lds_error_code lds_client_bind_exact_linuxdo_space(
+    lds_client *client,
+    const char *prefix,
+    const char *mail_suffix_fragment,
+    int allow_overlap,
+    lds_mailbox **out_mailbox) {
+  return bind_common(
+      client,
+      LDS_MAILBOX_MODE_EXACT,
+      prefix,
+      LDS_SUFFIX_LINUXDO_SPACE,
+      mail_suffix_fragment,
+      1,
+      allow_overlap,
+      out_mailbox);
+}
+
+lds_error_code lds_client_bind_regex_linuxdo_space(
+    lds_client *client,
+    const char *pattern,
+    const char *mail_suffix_fragment,
+    int allow_overlap,
+    lds_mailbox **out_mailbox) {
+  return bind_common(
+      client,
+      LDS_MAILBOX_MODE_PATTERN,
+      pattern,
+      LDS_SUFFIX_LINUXDO_SPACE,
+      mail_suffix_fragment,
+      1,
+      allow_overlap,
+      out_mailbox);
 }
 
 void lds_mailbox_close(lds_mailbox *mailbox) {
